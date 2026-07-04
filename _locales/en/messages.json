@@ -1,0 +1,17 @@
+{
+  "extName": { "message": "Big Lyrics for YouTube Music" },
+  "extDescription": {
+    "message": "Spotify-style synced lyrics for YouTube Music: full-screen or side panel, auto-scroll, click-to-seek, and prefetching."
+  },
+  "fabTitle": { "message": "Show lyrics (Spotify-style)" },
+  "closeTitle": { "message": "Close (Esc)" },
+  "modeFullscreenTitle": { "message": "Fullscreen" },
+  "modePanelTitle": { "message": "Panel mode (keeps the queue visible)" },
+  "resizeTitle": { "message": "Drag to resize the panel" },
+  "searching": { "message": "Looking for lyrics…" },
+  "notFound": { "message": "No lyrics found for this song 😕" },
+  "plainNote": { "message": "Unsynced lyrics (they won't highlight with the music)" },
+  "nativeNote": { "message": "Lyrics from YouTube Music (unsynced)" },
+  "hint": { "message": "Click a line to jump to that part · Esc to close" },
+  "backToCurrent": { "message": "Back to the current line" }
+}

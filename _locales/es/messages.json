@@ -1,0 +1,17 @@
+{
+  "extName": { "message": "Big Lyrics for YouTube Music" },
+  "extDescription": {
+    "message": "Letras sincronizadas estilo Spotify para YouTube Music: pantalla completa o panel lateral, auto-scroll, clic para saltar y precarga."
+  },
+  "fabTitle": { "message": "Ver letra (estilo Spotify)" },
+  "closeTitle": { "message": "Cerrar (Esc)" },
+  "modeFullscreenTitle": { "message": "Pantalla completa" },
+  "modePanelTitle": { "message": "Modo panel (deja ver la cola de reproducción)" },
+  "resizeTitle": { "message": "Arrastra para ajustar el ancho del panel" },
+  "searching": { "message": "Buscando la letra…" },
+  "notFound": { "message": "No se encontró la letra de esta canción 😕" },
+  "plainNote": { "message": "Letra sin sincronizar (no se resalta con la música)" },
+  "nativeNote": { "message": "Letra de YouTube Music (sin sincronizar)" },
+  "hint": { "message": "Haz clic en una línea para saltar a esa parte · Esc para cerrar" },
+  "backToCurrent": { "message": "Volver a la línea actual" }
+}
