@@ -6,6 +6,17 @@
 (() => {
   'use strict';
 
+  // Flip to true to trace lyrics fetching, cache hits/misses and the
+  // duration used vs. the real track length in the page console.
+  const DEBUG = false;
+
+  // If a cached synced master's own duration differs from the real track
+  // length by more than this (seconds), we assume a wrong master slipped in
+  // (e.g. a prefetch that ran without a reliable duration) and refetch with
+  // the correct duration. Loose enough not to churn on legitimately-close
+  // masters; tight enough to catch the constant-offset bug.
+  const DURATION_TOLERANCE = 5;
+
   // ---------- i18n ----------
 
   const FALLBACK_STRINGS = {
@@ -153,7 +164,18 @@
   }
 
   function getDuration() {
-    if (playerTime.d && isFinite(playerTime.d) && performance.now() - playerTime.at < 5000) {
+    // Trust the official player's duration only when it is fresh AND belongs
+    // to the track we currently consider active. Right after a song change
+    // the last time-resp may still carry the PREVIOUS track's duration (it is
+    // reported together with its video id), which — sent to LRCLIB — would
+    // select a mismatched master. Since duration and video id arrive in the
+    // same message, matching ids guarantees the duration is the current one.
+    if (
+      playerTime.d &&
+      isFinite(playerTime.d) &&
+      performance.now() - playerTime.at < 5000 &&
+      (!state.videoId || playerTime.v === state.videoId)
+    ) {
       return playerTime.d;
     }
     const v = getVideo();
@@ -193,6 +215,11 @@
   const sessionCache = new Map(); // "title|artist" -> data | null
   const SESSION_CACHE_MAX = 60;
 
+  // Keys already re-validated against the real duration this session, so a
+  // song whose best available master is legitimately off-length is refetched
+  // at most once instead of on every replay.
+  const revalidatedKeys = new Set();
+
   function cacheKey(track, artist) {
     return `${track}|${artist}`.toLowerCase();
   }
@@ -204,14 +231,24 @@
     }
   }
 
-  function requestLyrics(track, artist, duration, cb) {
+  function requestLyrics(track, artist, duration, cb, opts) {
+    const force = !!(opts && opts.force);
     const key = cacheKey(track, artist);
-    if (sessionCache.has(key) && sessionCache.get(key) !== null) {
+    if (!force && sessionCache.has(key) && sessionCache.get(key) !== null) {
+      if (DEBUG) console.log('[ytml] requestLyrics session HIT', key);
       if (cb) cb(sessionCache.get(key));
       return;
     }
+    if (DEBUG) {
+      console.log(
+        '[ytml] requestLyrics %s %s dur=%s',
+        force ? 'FORCE' : 'MISS',
+        key,
+        duration
+      );
+    }
     chrome.runtime.sendMessage(
-      { type: 'getLyrics', track: cleanTitle(track), artist, duration },
+      { type: 'getLyrics', track: cleanTitle(track), artist, duration, forceRefresh: force },
       (resp) => {
         const data =
           !chrome.runtime.lastError && resp && resp.ok ? resp.data : null;
@@ -542,11 +579,51 @@
     if (state.open) renderLyrics();
 
     const reqKey = currentKey();
-    requestLyrics(np.title, np.artist, getDuration(), (data) => {
+    const dedupKey = cacheKey(np.title, np.artist);
+    // Reliable, current-track duration (getDuration() is now video-id-guarded).
+    const reliableDur = getDuration();
+    if (DEBUG) console.log('[ytml] fetchLyrics "%s" durSent=%s', np.title, reliableDur);
+
+    const onData = (data) => {
       if (currentKey() !== reqKey) return; // stale response: song changed
+
+      // Re-validate synced lyrics against the real track length. A prefetch
+      // that ran with a missing/unreliable queue duration can cache a wrong
+      // master (correct words, another master's timestamps) → a constant
+      // offset. If the cached master's own duration is far from the real one,
+      // refetch ONCE forcing a fresh, duration-aware lookup that overwrites
+      // both the session and the persistent cache.
+      if (
+        !revalidatedKeys.has(dedupKey) &&
+        data &&
+        data.syncedLyrics &&
+        reliableDur &&
+        typeof data.duration === 'number' &&
+        Math.abs(data.duration - reliableDur) > DURATION_TOLERANCE
+      ) {
+        revalidatedKeys.add(dedupKey);
+        if (DEBUG) {
+          console.log(
+            '[ytml] duration mismatch: master=%s real=%s -> refetch',
+            data.duration,
+            reliableDur
+          );
+        }
+        requestLyrics(np.title, np.artist, reliableDur, onData, { force: true });
+        return;
+      }
+
       if (data && data.syncedLyrics) {
         state.lines = parseLRC(data.syncedLyrics);
         state.status = state.lines.length ? 'synced' : 'notfound';
+        if (DEBUG) {
+          console.log(
+            '[ytml] synced OK lines=%d masterDur=%s real=%s',
+            state.lines.length,
+            data.duration,
+            reliableDur
+          );
+        }
       } else if (data && data.plainLyrics) {
         state.plain = data.plainLyrics;
         state.plainSource = data.native ? 'native' : 'lrclib';
@@ -577,7 +654,9 @@
         return; // keep "loading" until the fallback resolves
       }
       if (state.open) renderLyrics();
-    });
+    };
+
+    requestLyrics(np.title, np.artist, reliableDur, onData);
   }
 
   // ---------- Watch loops ----------
@@ -601,7 +680,13 @@
         np && np.title && `${np.title}|${np.artist}` !== currentKey();
 
       if (byId || byTitle) {
-        if (vid) lastVideoId = vid;
+        // Register the current video id so getDuration() only trusts a
+        // player duration tagged with this same id (avoids the previous
+        // track's duration leaking into the fetch right after a change).
+        if (vid) {
+          lastVideoId = vid;
+          state.videoId = vid;
+        }
         state.stale = true;
         state.userScrolling = false;
         updateResumeBtn();

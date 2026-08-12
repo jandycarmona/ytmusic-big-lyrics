@@ -13,6 +13,10 @@ const HEADERS = { 'Lrclib-Client': 'Big-Lyrics-for-YouTube-Music v1.0.0' };
 const CACHE_PREFIX = 'lyr:';
 const MAX_CACHE_ENTRIES = 300;
 
+// Flip to true to trace cache hits/misses and master selection in the
+// service-worker console (chrome://extensions -> service worker).
+const DEBUG = false;
+
 // ---------- Persistent cache ----------
 
 function cacheStorageKey(track, artist) {
@@ -69,6 +73,19 @@ function pickBest(results, durationSec) {
       return { r, score };
     })
     .sort((a, b) => b.score - a.score);
+  if (DEBUG && scored.length) {
+    console.log(
+      '[ytml-bg] pickBest dur=%s ->',
+      durationSec,
+      scored.slice(0, 5).map((s) => ({
+        id: s.r.id,
+        name: s.r.trackName,
+        dur: s.r.duration,
+        synced: !!s.r.syncedLyrics,
+        score: s.score,
+      }))
+    );
+  }
   return scored.length ? scored[0].r : null;
 }
 
@@ -104,8 +121,25 @@ async function lookupLyrics({ track, artist, album, duration }) {
 async function getLyrics(msg) {
   const key = cacheStorageKey(msg.track, msg.artist);
 
-  const cached = await cacheGet(key);
-  if (cached) return cached;
+  // forceRefresh: the content script detected that the cached master's
+  // duration disagrees with the real track length (a mismatched master was
+  // cached by a prefetch that ran without a reliable duration). Bypass the
+  // cache and overwrite it with a fresh, duration-aware lookup.
+  if (!msg.forceRefresh) {
+    const cached = await cacheGet(key);
+    if (cached) {
+      if (DEBUG) console.log('[ytml-bg] cache HIT', key, 'dur=', cached.duration);
+      return cached;
+    }
+  }
+  if (DEBUG) {
+    console.log(
+      '[ytml-bg] cache %s %s dur=%s',
+      msg.forceRefresh ? 'BYPASS' : 'MISS',
+      key,
+      msg.duration
+    );
+  }
 
   const data = await lookupLyrics(msg);
   // Only successful results are persisted: a song missing today may be
@@ -114,7 +148,18 @@ async function getLyrics(msg) {
     const slim = {
       syncedLyrics: data.syncedLyrics || null,
       plainLyrics: data.plainLyrics || null,
+      // The chosen master's own duration. Stored so the content script can
+      // re-validate it against the real track length at playback time and
+      // refetch if a wrong master slipped through (see fetchLyrics).
+      duration: typeof data.duration === 'number' ? data.duration : null,
     };
+    if (DEBUG) {
+      console.log(
+        '[ytml-bg] picked master dur=%s synced=%s',
+        slim.duration,
+        !!slim.syncedLyrics
+      );
+    }
     await cachePut(key, slim);
     return slim;
   }
