@@ -39,18 +39,18 @@ Works on `music.youtube.com` in Chrome/Edge **and inside the YouTube Music deskt
 
 | File | Role |
 | --- | --- |
-| `content.js` | Detects the playing song (player bar + video id), renders the UI, handles auto-scroll/manual-scroll, click-to-seek, prefetching and the session cache. |
+| `content.js` | Detects the playing song (now-playing bar + video id, player API as fallback), renders the UI, handles auto-scroll/manual-scroll, click-to-seek, prefetching and the session cache. |
 | `background.js` | Service worker. Queries the LRCLIB API (exact match → track/artist search → free-text search) and maintains the persistent on-disk lyrics cache. |
 | `page-bridge.js` | Runs in the page's main world. Bridges to YouTube's official player API (`seekTo`, exact current time, video id) and to YouTube Music's internal endpoints to read its native *Lyrics* tab. |
 | `styles.css` | Panel and fullscreen styling. |
 | `_locales/` | UI strings (English default, Spanish included). |
 
-Song changes are detected primarily by **video id** — which changes on every track, including brand-new queues — with the player-bar title/artist as a secondary signal. Seeking uses the player's own `seekTo()` (the same mechanism as the progress bar), never raw `<video>.currentTime` manipulation, which avoids desyncs.
+Song changes are detected primarily by **video id** — which changes on every track, including brand-new queues — with the now-playing bar's title/artist as a secondary signal. Both now-playing bars YouTube Music has shipped are supported: the legacy `ytmusic-player-bar` and the October 2026 mini player (`ytmusic-miniplayer` / `ytmusic-track-info`); if neither can be read, the player API's own title/author is used. During ads the panel keeps "searching" and loads the lyrics as soon as the song starts. Seeking uses the player's own `seekTo()` (the same mechanism as the progress bar), never raw `<video>.currentTime` manipulation, which avoids desyncs.
 
 ## Limitations
 
 - Lyrics availability depends on LRCLIB and on YouTube Music's own catalog; very new or niche songs may have no lyrics anywhere.
-- YouTube Music is a fast-moving app; if a redesign changes its internal DOM, selectors may need updating. Issues and PRs welcome.
+- YouTube Music is a fast-moving app; if a redesign changes its internal DOM, selectors may need updating. Selectors for the now-playing bar live in `content.js` (`readWizTrackInfo`, `readLegacyPlayerBar`). Issues and PRs welcome.
 
 ## Credits
 

@@ -4,7 +4,8 @@
 #ytml-fab {
   position: fixed;
   right: 20px;
-  bottom: 88px; /* the player bar is ~72px tall */
+  /* sits above the now-playing bar; its height is synced from content.js */
+  bottom: calc(var(--ytml-bar-h, 72px) + 16px);
   z-index: 999998;
   width: 48px;
   height: 48px;
@@ -201,7 +202,7 @@
 #ytml-overlay.panel {
   right: auto;
   width: var(--ytml-width, min(52vw, 800px));
-  bottom: 72px; /* the player bar stays visible and usable */
+  bottom: var(--ytml-bar-h, 72px); /* the player bar stays visible and usable */
   background: #030303; /* same black as YouTube Music */
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }

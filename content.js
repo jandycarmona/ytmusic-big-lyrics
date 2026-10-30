@@ -68,6 +68,32 @@
 
   const $ = (sel, root = document) => root.querySelector(sel);
 
+  // Trusted Types: YouTube Music's main world requires TrustedHTML for
+  // innerHTML. Content scripts normally run exempt, but if the page's policy
+  // ever applies here, wrap our own static markup in a pass-through policy
+  // instead of letting the whole UI fail to build.
+  let ttPolicy = null;
+  function toHTML(html) {
+    if (!window.trustedTypes) return html;
+    try {
+      if (!ttPolicy) {
+        ttPolicy = window.trustedTypes.createPolicy('ytml', {
+          createHTML: (s) => s, // only ever fed our own constant templates
+        });
+      }
+      return ttPolicy.createHTML(html);
+    } catch {
+      return html;
+    }
+  }
+  function setHTML(el, html) {
+    try {
+      el.innerHTML = html;
+    } catch {
+      el.innerHTML = toHTML(html);
+    }
+  }
+
   // YT Music can leave more than one <video> in the page while switching
   // songs. Always pick the one that is actually playing, never a stale one.
   function getVideo() {
@@ -86,20 +112,86 @@
       .trim();
   }
 
-  function getNowPlaying() {
+  // ---------- Now-playing bar ----------
+  // YouTube Music has shipped two now-playing bars:
+  //   - Legacy (until ~Oct 2026): <ytmusic-player-bar> with .title / .byline
+  //     and img.image.
+  //   - "Wiz" mini player (Oct 2026): <ytmusic-miniplayer> containing
+  //     <ytmusic-track-info> with .ytmusicTrackInfoTitle (full title in its
+  //     `title` attribute), .ytmusicTrackInfoByline ("Artist • Album • Year"
+  //     for songs, "Artist • N views • N likes" for videos) and
+  //     img.ytmusicTrackInfoThumbnail.
+  // Rollouts are A/B tested, so both are supported. When neither yields a
+  // title, the official player API (via page-bridge.js) is the last resort.
+
+  function getBarEl() {
+    return $('ytmusic-miniplayer') || $('ytmusic-player-bar');
+  }
+
+  function readWizTrackInfo() {
+    const info = $('ytmusic-track-info');
+    if (!info) return null;
+    const titleEl = info.querySelector('.ytmusicTrackInfoTitle');
+    const title = (
+      titleEl?.getAttribute('title') ||
+      titleEl?.textContent ||
+      ''
+    ).trim();
+    if (!title) return null; // blank while an ad plays
+    const bylineEl = info.querySelector('.ytmusicTrackInfoByline');
+    const links = [...(bylineEl?.querySelectorAll('a') || [])].map((a) =>
+      a.textContent.trim()
+    );
+    const byline = (bylineEl?.textContent || '').trim();
+    const artist = links[0] || byline.split('•')[0].trim();
+    // Songs link both artist and album; videos only link the artist.
+    const album = links.length >= 2 ? links[links.length - 1] : '';
+    return { title, artist, album };
+  }
+
+  function readLegacyPlayerBar() {
     const bar = $('ytmusic-player-bar');
     if (!bar) return null;
     const title = bar.querySelector('.title')?.textContent?.trim();
-    const byline = bar.querySelector('.byline')?.textContent?.trim();
     if (!title) return null;
-    const artist = (byline || '').split('•')[0].trim();
-    return { title, artist };
+    const byline = bar.querySelector('.byline')?.textContent?.trim() || '';
+    const parts = byline.split('•').map((s) => s.trim());
+    // Legacy byline for songs: "Artist • Album • Year".
+    const album = parts.length >= 3 && /^\d{4}$/.test(parts[2]) ? parts[1] : '';
+    return { title, artist: parts[0] || '', album };
+  }
+
+  function readFromPlayer() {
+    // Only trust it when fresh and not during an ad.
+    if (!playerTime.title || playerTime.ad) return null;
+    if (performance.now() - playerTime.at > 2000) return null;
+    const artist = (playerTime.author || '').replace(/\s+-\s+Topic$/i, '').trim();
+    return { title: playerTime.title.trim(), artist, album: '' };
+  }
+
+  function getNowPlaying() {
+    return readWizTrackInfo() || readLegacyPlayerBar() || readFromPlayer();
   }
 
   function getArtworkUrl() {
-    const img = $('ytmusic-player-bar img.image');
+    const img =
+      $('ytmusic-track-info img.ytmusicTrackInfoThumbnail') ||
+      $('ytmusic-player-bar img.image');
     if (!img || !img.src) return '';
     return img.src.replace(/w\d+-h\d+/, 'w544-h544'); // request a big cover
+  }
+
+  // The bar's height changed with the redesign (64–72 px depending on the
+  // window width), so panel mode and the floating button follow the real
+  // value instead of a hard-coded one.
+  function syncBarHeight() {
+    const bar = getBarEl();
+    const h = bar ? Math.round(bar.getBoundingClientRect().height) : 0;
+    const val = `${h > 0 ? h : 72}px`;
+    const root = document.documentElement;
+    if (root.style.getPropertyValue('--ytml-bar-h') !== val) {
+      root.style.setProperty('--ytml-bar-h', val);
+    }
   }
 
   function parseLRC(lrc) {
@@ -122,7 +214,15 @@
   // YouTube's official player (#movie_player) gives exact time, duration and
   // video id for the current track; the <video> element can lag behind.
 
-  const playerTime = { t: null, d: null, v: null, at: 0 };
+  const playerTime = {
+    t: null,
+    d: null,
+    v: null,
+    title: null,
+    author: null,
+    ad: false,
+    at: 0,
+  };
   let nativeReq = null; // pending native-lyrics request { key, cb, timer }
 
   window.addEventListener('message', (e) => {
@@ -132,6 +232,9 @@
       playerTime.t = e.data.t;
       playerTime.d = e.data.d;
       playerTime.v = e.data.v || null;
+      playerTime.title = e.data.title || null;
+      playerTime.author = e.data.author || null;
+      playerTime.ad = !!e.data.ad;
       playerTime.at = performance.now();
     } else if (e.data.type === 'ytml-seek-fallback') {
       const v = getVideo();
@@ -220,6 +323,9 @@
   // at most once instead of on every replay.
   const revalidatedKeys = new Set();
 
+  // Lookups currently waiting on the background worker: key -> [callbacks].
+  const inflight = new Map();
+
   function cacheKey(track, artist) {
     return `${track}|${artist}`.toLowerCase();
   }
@@ -247,13 +353,34 @@
         duration
       );
     }
+    // Overlapping prefetch passes (on song change, at boot, every 15 s) can
+    // ask for the same song before the first answer arrives. Join the
+    // request already in flight instead of hitting LRCLIB again.
+    if (!force && inflight.has(key)) {
+      if (cb) inflight.get(key).push(cb);
+      return;
+    }
+    if (!force) inflight.set(key, cb ? [cb] : []);
     chrome.runtime.sendMessage(
-      { type: 'getLyrics', track: cleanTitle(track), artist, duration, forceRefresh: force },
+      {
+        type: 'getLyrics',
+        track: cleanTitle(track),
+        artist,
+        album: (opts && opts.album) || undefined,
+        duration,
+        forceRefresh: force,
+      },
       (resp) => {
         const data =
           !chrome.runtime.lastError && resp && resp.ok ? resp.data : null;
         sessionCachePut(key, data);
-        if (cb) cb(data);
+        if (force) {
+          if (cb) cb(data);
+          return;
+        }
+        const waiting = inflight.get(key) || [];
+        inflight.delete(key);
+        for (const fn of waiting) fn(data);
       }
     );
   }
@@ -308,8 +435,10 @@
     fab = document.createElement('button');
     fab.id = 'ytml-fab';
     fab.title = t('fabTitle');
-    fab.innerHTML =
-      '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+    setHTML(
+      fab,
+      '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>'
+    );
     fab.addEventListener('click', toggleOverlay);
     document.body.appendChild(fab);
 
@@ -317,7 +446,7 @@
     overlay = document.createElement('div');
     overlay.id = 'ytml-overlay';
     overlay.hidden = true;
-    overlay.innerHTML = `
+    setHTML(overlay, `
       <div id="ytml-bg"></div>
       <div id="ytml-scrim"></div>
       <header id="ytml-header">
@@ -335,7 +464,7 @@
       <button id="ytml-resume" hidden>⤓ ${t('backToCurrent')}</button>
       <div id="ytml-resize" title="${t('resizeTitle')}"></div>
       <footer id="ytml-hint">${t('hint')}</footer>
-    `;
+    `);
     document.body.appendChild(overlay);
 
     linesEl = $('#ytml-lines', overlay);
@@ -414,7 +543,7 @@
     overlay.classList.toggle('panel', state.mode === 'panel');
     const btn = $('#ytml-mode', overlay);
     if (btn) {
-      btn.innerHTML = state.mode === 'panel' ? ICON_EXPAND : ICON_PANEL;
+      setHTML(btn, state.mode === 'panel' ? ICON_EXPAND : ICON_PANEL);
       btn.title =
         state.mode === 'panel' ? t('modeFullscreenTitle') : t('modePanelTitle');
     }
@@ -462,7 +591,7 @@
     if (msg) {
       statusEl.textContent = msg;
       statusEl.hidden = false;
-      linesEl.innerHTML = '';
+      linesEl.replaceChildren();
     } else {
       statusEl.hidden = true;
     }
@@ -483,7 +612,7 @@
     if (state.status === 'notfound') return setStatus(t('notFound'));
 
     setStatus('');
-    linesEl.innerHTML = '';
+    linesEl.replaceChildren();
     linesEl.scrollTop = 0;
 
     if (state.status === 'plain') {
@@ -564,7 +693,14 @@
   function fetchLyrics() {
     const np = getNowPlaying();
     if (!np || !np.title) {
-      state.status = 'notfound';
+      if (playerTime.ad) {
+        // An ad is playing: the bar is blank for now. Keep "searching" and
+        // stay stale; the watch loop refetches as soon as the title shows.
+        state.status = 'loading';
+        state.stale = true;
+      } else {
+        state.status = 'notfound';
+      }
       if (state.open) renderLyrics();
       return;
     }
@@ -609,7 +745,10 @@
             reliableDur
           );
         }
-        requestLyrics(np.title, np.artist, reliableDur, onData, { force: true });
+        requestLyrics(np.title, np.artist, reliableDur, onData, {
+          force: true,
+          album: np.album,
+        });
         return;
       }
 
@@ -656,7 +795,7 @@
       if (state.open) renderLyrics();
     };
 
-    requestLyrics(np.title, np.artist, reliableDur, onData);
+    requestLyrics(np.title, np.artist, reliableDur, onData, { album: np.album });
   }
 
   // ---------- Watch loops ----------
@@ -678,8 +817,15 @@
       const byId = vid && vid !== lastVideoId;
       const byTitle =
         np && np.title && `${np.title}|${np.artist}` !== currentKey();
+      // The panel was left "searching" because an ad blanked the bar; the
+      // title is back (possibly the same song, e.g. on repeat): fetch now.
+      const afterAd =
+        state.open && state.stale && state.status === 'loading' &&
+        np && np.title && !playerTime.ad;
 
-      if (byId || byTitle) {
+      syncBarHeight();
+
+      if (byId || byTitle || afterAd) {
         // Register the current video id so getDuration() only trusts a
         // player duration tagged with this same id (avoids the previous
         // track's duration leaking into the fetch right after a change).
@@ -722,6 +868,7 @@
 
   function init() {
     if ($('#ytml-fab')) return;
+    syncBarHeight();
     buildUI();
     watchSongChanges();
   }

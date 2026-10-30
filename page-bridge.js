@@ -5,8 +5,10 @@
 //
 // Message protocol with content.js (window.postMessage):
 //   ytml-seek          { t }        -> seek to t seconds of the CURRENT track
-//   ytml-time          {}           -> replies ytml-time-resp { t, d, v }
-//                                      (current time, duration, video id)
+//   ytml-time          {}           -> replies ytml-time-resp
+//                                      { t, d, v, title, author, ad }
+//                                      (current time, duration, video id,
+//                                      player's title/author, ad playing)
 //   ytml-native-lyrics { key }      -> replies ytml-native-lyrics-resp
 //                                      { key, lyrics } with the lyrics from
 //                                      YouTube Music's own "Lyrics" tab
@@ -74,12 +76,21 @@
     if (e.data.type === 'ytml-time') {
       const p = getPlayer();
       if (p) {
+        const vd = p.getVideoData ? p.getVideoData() || {} : {};
         window.postMessage(
           {
             type: 'ytml-time-resp',
             t: p.getCurrentTime(),
             d: typeof p.getDuration === 'function' ? p.getDuration() : null,
-            v: p.getVideoData ? p.getVideoData().video_id : null,
+            v: vd.video_id || null,
+            // Title/author straight from the player: a DOM-independent
+            // fallback for the now-playing track (YT Music redesigns its
+            // player bar every few months; the player API stays stable).
+            title: vd.title || null,
+            author: vd.author || null,
+            // While an ad plays, the now-playing bar is blank and
+            // navigator.mediaSession describes the ad, not the song.
+            ad: p.classList.contains('ad-showing'),
           },
           '*'
         );

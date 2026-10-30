@@ -8,7 +8,7 @@
 // tiny (well under 2 MB) and lives on disk, not in RAM.
 
 const API = 'https://lrclib.net/api';
-const HEADERS = { 'Lrclib-Client': 'Big-Lyrics-for-YouTube-Music v1.0.0' };
+const HEADERS = { 'Lrclib-Client': 'Big-Lyrics-for-YouTube-Music v1.1.0' };
 
 const CACHE_PREFIX = 'lyr:';
 const MAX_CACHE_ENTRIES = 300;
